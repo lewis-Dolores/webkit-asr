@@ -5,7 +5,6 @@ export function useSpeechRecognition() {
   const [results, setResults] = useState([])
   const [error, setError] = useState('')
   const recognitionRef = useRef(null)
-  const audioContextRef = useRef(null)
 
   const formatTime = (seconds) => {
     const hours = Math.floor(seconds / 3600)
@@ -27,7 +26,6 @@ export function useSpeechRecognition() {
 
   const downloadSRT = (results) => {
     if (!results || results.length === 0) return
-    
     const srtContent = generateSRT(results)
     const blob = new Blob([srtContent], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
@@ -57,12 +55,6 @@ export function useSpeechRecognition() {
     setResults([])
 
     try {
-      const arrayBuffer = await audioFile.arrayBuffer()
-      audioContextRef.current = new AudioContext()
-      const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer)
-      
-      const duration = audioBuffer.duration
-      
       const recognition = new SpeechRecognition()
       recognitionRef.current = recognition
       recognition.continuous = true
@@ -70,7 +62,8 @@ export function useSpeechRecognition() {
       recognition.lang = 'zh-TW'
 
       const finalResults = []
-      let chunkStartTime = 0
+      let currentSegmentStart = 0
+      let lastResultIndex = -1
 
       recognition.onresult = (event) => {
         for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -79,16 +72,20 @@ export function useSpeechRecognition() {
             const transcript = result[0].transcript
             const confidence = result[0].confidence
             
-            const estimatedStart = chunkStartTime + (finalResults.length / 3)
-            const estimatedEnd = estimatedStart + 3
+            // 簡單的時間戳估計
+            const durationPerSegment = 3
+            const startTime = lastResultIndex + 1
+            const endTime = startTime + durationPerSegment
             
             finalResults.push({
               index: finalResults.length + 1,
-              startTime: Math.min(estimatedStart, duration),
-              endTime: Math.min(estimatedEnd, duration),
+              startTime: startTime,
+              endTime: endTime,
               text: transcript,
               confidence: confidence
             })
+            
+            lastResultIndex++
           }
         }
       }
@@ -96,44 +93,48 @@ export function useSpeechRecognition() {
       recognition.onerror = (event) => {
         console.error('Speech recognition error:', event.error)
         if (event.error === 'no-speech') {
+          // 忽略無語音錯誤
         } else if (event.error === 'aborted') {
+          // 忽略中止錯誤
         } else {
           setError(`語音辨識錯誤：${event.error}`)
         }
       }
 
-      recognition.onend = () => {
-        console.log('Recognition ended')
-      }
-
       recognition.start()
 
-      const audioElement = document.createElement('audio')
-      audioElement.src = URL.createObjectURL(audioFile)
-      audioElement.connect = function(destination) {
-        const source = audioContextRef.current.createMediaElementSource(this)
-        source.connect(destination)
-        source.connect(audioContextRef.current.destination)
-      }
+      // 建立 AudioContext 來播放音訊
+      const audioContext = new AudioContext()
+      const arrayBuffer = await audioFile.arrayBuffer()
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
       
-      const source = audioContextRef.current.createMediaStreamDestination()
-      audioElement.connect(source)
+      // 建立音訊來源並播放
+      const source = audioContext.createBufferSource()
+      source.buffer = audioBuffer
+      source.connect(audioContext.destination)
       
+      const duration = audioBuffer.duration
+      const startTime = Date.now()
+      
+      source.start(0)
+      
+      // 等待播放完成
       await new Promise((resolve) => {
-        audioElement.onended = resolve
-        audioElement.play().catch(err => {
-          console.error('Playback error:', err)
-          resolve()
-        })
+        source.onended = resolve
       })
-
-      recognition.stop()
-      await new Promise(resolve => setTimeout(resolve, 1000))
-
-      setResults(finalResults)
       
+      // 等待辨識結果穩定
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      
+      recognition.stop()
+      
+      // 清理
+      await audioContext.close()
+      
+      setResults(finalResults)
+
       if (finalResults.length === 0) {
-        setError('未能識別任何語音內容。請確保音訊品質良好，並在安靜環境下使用。')
+        setError('未能識別任何語音內容。請確保音訊品質良好。')
       }
 
       return finalResults
@@ -148,10 +149,8 @@ export function useSpeechRecognition() {
         try {
           recognitionRef.current.stop()
         } catch (e) {
+          // 忽略停止錯誤
         }
-      }
-      if (audioContextRef.current) {
-        await audioContextRef.current.close()
       }
     }
   }
