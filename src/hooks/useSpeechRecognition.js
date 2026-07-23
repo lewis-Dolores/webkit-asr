@@ -1,10 +1,11 @@
-import { useState, useRef } from 'react'
+import { useState } from 'react'
+import { pipeline } from '@xenova/transformers'
 
 export function useSpeechRecognition() {
   const [isProcessing, setIsProcessing] = useState(false)
   const [results, setResults] = useState([])
   const [error, setError] = useState('')
-  const recognitionRef = useRef(null)
+  const [progress, setProgress] = useState(0)
 
   const formatTime = (seconds) => {
     const hours = Math.floor(seconds / 3600)
@@ -14,19 +15,18 @@ export function useSpeechRecognition() {
     return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(ms).padStart(3, '0')}`
   }
 
-  const generateSRT = (results) => {
+  const generateSRT = (segments) => {
     let srtContent = ''
-    results.forEach((result, index) => {
+    segments.forEach((segment, index) => {
       srtContent += `${index + 1}\n`
-      srtContent += `${formatTime(result.startTime)} --> ${formatTime(result.endTime)}\n`
-      srtContent += `${result.text}\n\n`
+      srtContent += `${formatTime(segment.timestamp[0])} --> ${formatTime(segment.timestamp[1])}\n`
+      srtContent += `${segment.text.trim()}\n\n`
     })
     return srtContent
   }
 
-  const downloadSRT = (results) => {
-    if (!results || results.length === 0) return
-    const srtContent = generateSRT(results)
+  const downloadSRT = (srtContent) => {
+    if (!srtContent) return
     const blob = new Blob([srtContent], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -44,130 +44,51 @@ export function useSpeechRecognition() {
       return null
     }
 
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SpeechRecognition) {
-      setError('您的瀏覽器不支援 Web Speech API，請使用 Chrome 或 Safari')
-      return null
-    }
-
-    setIsProcessing(true)
-    setError('')
-    setResults([])
-
     try {
-      const recognition = new SpeechRecognition()
-      recognitionRef.current = recognition
-      recognition.continuous = true
-      recognition.interimResults = false
-      recognition.lang = 'zh-TW'
+      setIsProcessing(true)
+      setError('')
+      setProgress(0)
+      setResults([])
 
-      const finalResults = []
-      let currentSegmentStart = 0
-      let lastResultIndex = -1
-
-      recognition.onresult = (event) => {
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const result = event.results[i]
-          if (result.isFinal) {
-            const transcript = result[0].transcript
-            const confidence = result[0].confidence
-            
-            // 簡單的時間戳估計
-            const durationPerSegment = 3
-            const startTime = lastResultIndex + 1
-            const endTime = startTime + durationPerSegment
-            
-            finalResults.push({
-              index: finalResults.length + 1,
-              startTime: startTime,
-              endTime: endTime,
-              text: transcript,
-              confidence: confidence
-            })
-            
-            lastResultIndex++
+      // Load Whisper model
+      const transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+        progress_callback: (data) => {
+          if (data.status === 'progress') {
+            setProgress(Math.round(data.progress))
           }
         }
-      }
-
-      recognition.onerror = (event) => {
-        console.error('Speech recognition error:', event.error)
-        if (event.error === 'no-speech') {
-          // 忽略無語音錯誤
-        } else if (event.error === 'aborted') {
-          // 忽略中止錯誤
-        } else {
-          setError(`語音辨識錯誤：${event.error}`)
-        }
-      }
-
-      recognition.start()
-
-      // 建立 AudioContext 來播放音訊
-      const audioContext = new AudioContext()
-      const arrayBuffer = await audioFile.arrayBuffer()
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
-      
-      // 建立音訊來源並播放
-      const source = audioContext.createBufferSource()
-      source.buffer = audioBuffer
-      source.connect(audioContext.destination)
-      
-      const duration = audioBuffer.duration
-      const startTime = Date.now()
-      
-      source.start(0)
-      
-      // 等待播放完成
-      await new Promise((resolve) => {
-        source.onended = resolve
       })
-      
-      // 等待辨識結果穩定
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      
-      recognition.stop()
-      
-      // 清理
-      await audioContext.close()
-      
-      setResults(finalResults)
 
-      if (finalResults.length === 0) {
-        setError('未能識別任何語音內容。請確保音訊品質良好。')
-      }
+      // Read audio file as ArrayBuffer
+      const arrayBuffer = await audioFile.arrayBuffer()
+      
+      // Transcribe
+      const output = await transcriber(arrayBuffer, {
+        chunk_length_s: 30,
+        stride_length_s: 5,
+        return_timestamps: true
+      })
 
-      return finalResults
-
+      const segments = output.chunks || [{ text: output.text, timestamp: [0, 0] }]
+      setResults(segments)
+      
+      const srtContent = generateSRT(segments)
+      return srtContent
     } catch (err) {
-      console.error('Processing error:', err)
-      setError(`處理錯誤：${err.message}`)
+      console.error('ASR Error:', err)
+      setError(`辨識失敗：${err.message}`)
       return null
     } finally {
       setIsProcessing(false)
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop()
-        } catch (e) {
-          // 忽略停止錯誤
-        }
-      }
     }
-  }
-
-  const reset = () => {
-    setResults([])
-    setError('')
-    setIsProcessing(false)
   }
 
   return {
     isProcessing,
     results,
     error,
+    progress,
     processAudio,
-    downloadSRT,
-    reset,
-    formatTime
+    downloadSRT
   }
 }
